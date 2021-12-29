@@ -78,6 +78,10 @@ class Detect(nn.Module):
 
 
 class Model(nn.Module):
+
+    grads_list = []
+    features_list = []
+
     def __init__(self, cfg='yolov5s.yaml', ch=3, nc=None, anchors=None):  # model, input channels, number of classes
         super().__init__()
         if isinstance(cfg, dict):
@@ -136,6 +140,10 @@ class Model(nn.Module):
             y.append(yi)
         return torch.cat(y, 1), None  # augmented inference, train
 
+    def save_gradient(self, grad):
+        # print('grad shape:', grad.shape)
+        self.grads_list.append(grad)
+
     def forward_once(self, x, profile=False, visualize=False):
         y, dt = [], []  # outputs
         for m in self.model:
@@ -155,8 +163,23 @@ class Model(nn.Module):
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
 
+            # save grad
             if visualize:
-                feature_visualization(x, m.type, m.i, save_dir=visualize)
+                if 'Detect' not in m.type:
+                    x.register_hook(self.save_gradient)
+                    self.features_list.append(x)
+                else:
+                    if isinstance(x, list):
+                        for _x in x:
+                            _x.register_hook(self.save_gradient)
+                            self.features_list.append(_x)
+                    elif isinstance(x, tuple):
+                        for _x in x[1]:
+                            _x.register_hook(self.save_gradient)
+                            self.features_list.append(_x)
+
+            # if visualize:
+            #     feature_visualization(x, m.type, m.i, save_dir=visualize)
 
         if profile:
             LOGGER.info('%.1fms total' % sum(dt))

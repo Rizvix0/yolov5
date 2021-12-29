@@ -26,8 +26,28 @@ from utils.general import check_img_size, check_requirements, check_imshow, colo
 from utils.plots import colors, plot_one_box
 from utils.torch_utils import select_device, load_classifier, time_sync
 
+from utils.loss import ComputeLoss
 
-@torch.no_grad()
+# 计算grad-cam并可视化
+def cam_show_img(img, feature_map, grads, out_name):
+    H, W, _ = img.shape
+    cam = np.zeros(feature_map.shape[1:], dtype=np.float32)
+    grads = grads.reshape([grads.shape[0],-1])					
+    weights = np.mean(grads, axis=1)							
+    for i, w in enumerate(weights):
+        cam += w * feature_map[i, :, :]							
+    
+    cam = cam - cam.min()
+    cam = cam / cam.max()
+    # cam = np.maximum(cam, 0)
+    cam = cv2.resize(cam, (W, H))
+
+    heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+    cam_img = 0.3 * heatmap + 0.7 * img
+
+    cv2.imwrite(out_name, cam_img)
+
+# @torch.no_grad()
 def run(weights='yolov5s.pt',  # model.pt path(s)
         source='data/images',  # file/dir/URL/glob, 0 for webcam
         imgsz=640,  # inference size (pixels)
@@ -117,6 +137,12 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
         bs = 1  # batch_size
     vid_path, vid_writer = [None] * bs, [None] * bs
 
+    if visualize:
+        # require grad
+        for k, v in model.named_parameters():
+            v.requires_grad = True  # train all layers
+        compute_loss = ComputeLoss(model)
+
     # Run inference
     if pt and device.type != 'cpu':
         model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.parameters())))  # run once
@@ -135,7 +161,33 @@ def run(weights='yolov5s.pt',  # model.pt path(s)
         t1 = time_sync()
         if pt:
             visualize = increment_path(save_dir / Path(path).stem, mkdir=True) if visualize else False
-            pred = model(img, augment=augment, visualize=visualize)[0]
+            # pred = model(img, augment=augment, visualize=visualize)[0]
+            
+            if visualize:
+                # grad-cam
+                pred = model(img, augment=augment, visualize=visualize)
+                _pred = non_max_suppression(pred[0], conf_thres, iou_thres, classes, agnostic_nms, max_det=max_det)
+                targets = torch.cat(_pred)
+                targets = targets[1:,:]
+
+                model.zero_grad()
+            
+                loss, loss_items = compute_loss(pred[1], targets.to(device))
+                loss.requires_grad_(True)
+                loss.backward()
+
+                _grads = model.grads_list
+                _grads.reverse()
+                _features = model.features_list
+                
+                for i in [17, 20, 23]:
+                    out_name = str(save_dir / f"{Path(path).stem}_{i}.jpg")
+                    cam_show_img(im0s, _features[i].cpu().detach().numpy()[0], _grads[i].cpu().detach().numpy()[0], out_name)
+
+                pred = pred[0]
+            else:
+                pred = model(img, augment=augment, visualize=visualize)[0]
+
         elif onnx:
             pred = torch.tensor(session.run([session.get_outputs()[0].name], {session.get_inputs()[0].name: img}))
         else:  # tensorflow model (tflite, pb, saved_model)
